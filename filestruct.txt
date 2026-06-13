@@ -1,0 +1,5 @@
+modernX11/
+├── build.sh               # Raw, hyper-optimized compilation engine
+└── src/
+    ├── modernX11.cppm     # The Primary Module Interface (The Macro Sieve)
+    └── main.cpp           # The Clean, Macro-Free Verification Entry
