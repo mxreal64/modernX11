@@ -23,14 +23,23 @@ namespace InternalUI {
         return WhitePixel(static_cast<::Display*>(d), s); 
     }
 
-    // 1. CAPTURE FIRST: Store the raw values safely while the macros still exist
+    // 1. CAPTURE FIRST: Store raw macro values safely
     constexpr long tmp_structure_notify_mask = StructureNotifyMask;
     constexpr long tmp_exposure_mask = ExposureMask;
+
+    constexpr int tmp_expose = Expose;
+    constexpr int tmp_configure_notify = ConfigureNotify;
+    constexpr int tmp_destroy_notify = DestroyNotify;
+    constexpr int tmp_client_message = ClientMessage;
 }
 
-// 2. PURGE SECOND: Kill the macros now so they can be legally reused as clean C++ tokens
+// 2. PURGE SECOND: Exterminate the legacy preprocessor macros
 #undef StructureNotifyMask
 #undef ExposureMask
+#undef Expose
+#undef ConfigureNotify
+#undef DestroyNotify
+#undef ClientMessage
 
 export namespace X11 {
     struct WindowHandle {
@@ -40,15 +49,16 @@ export namespace X11 {
 
     using DisplayHandle = void*;
 
-    // 3. EXPORT THIRD: Clean, namespaced type-safe C++ constants free of preprocessor tricks
+    // 3. EXPORT THIRD: Clean, namespaced modern C++ symbols
     constexpr long StructureNotifyMask = InternalUI::tmp_structure_notify_mask;
     constexpr long ExposureMask        = InternalUI::tmp_exposure_mask;
 
-    enum class EventType : unsigned char {
-        Unknown,
-        Paint,
-        Resize,
-        Quit
+    enum class EventType : int {
+        Expose          = InternalUI::tmp_expose,
+        ConfigureNotify = InternalUI::tmp_configure_notify,
+        DestroyNotify   = InternalUI::tmp_destroy_notify,
+        ClientMessage   = InternalUI::tmp_client_message,
+        Unknown         = -1
     };
 
     struct ResizeEvent {
@@ -76,6 +86,7 @@ export namespace CoreUI {
     private:
         X11::DisplayHandle display_ = nullptr;
         X11::WindowHandle win_handle_{};
+        unsigned long wm_delete_window_ = 0; // Stores the WM_DELETE_WINDOW Atom
         
         int width_ = 0;
         int height_ = 0;
@@ -100,8 +111,14 @@ export namespace CoreUI {
                 InternalUI::get_white_pixel(display_, screen)
             );
 
-            ::XStoreName(static_cast<::Display*>(display_), win_handle_.xid, std::string(title).c_str());
-            ::XSelectInput(static_cast<::Display*>(display_), win_handle_.xid, X11::StructureNotifyMask | X11::ExposureMask);
+            auto* dpy = static_cast<::Display*>(display_);
+
+            // Register the close button intercept protocol atom
+            wm_delete_window_ = ::XInternAtom(dpy, "WM_DELETE_WINDOW", False);
+            ::XSetWMProtocols(dpy, win_handle_.xid, &wm_delete_window_, 1);
+
+            ::XStoreName(dpy, win_handle_.xid, std::string(title).c_str());
+            ::XSelectInput(dpy, win_handle_.xid, X11::StructureNotifyMask | X11::ExposureMask);
             X11::map_window(display_, win_handle_);
             X11::flush(display_);
         }
@@ -120,21 +137,40 @@ export namespace CoreUI {
 
         void poll_events() noexcept {
             ::XEvent x_event;
-            while (::XPending(static_cast<::Display*>(display_))) {
-                ::XNextEvent(static_cast<::Display*>(display_), &x_event);
+            auto* dpy = static_cast<::Display*>(display_);
 
-                if (x_event.type == 12) { 
-                    if (on_paint_cb_) on_paint_cb_();
-                } 
-                else if (x_event.type == 22) { 
-                    width_ = x_event.xconfigure.width;
-                    height_ = x_event.xconfigure.height;
-                    if (on_resize_cb_) {
-                        on_resize_cb_(X11::ResizeEvent{width_, height_});
+            while (::XPending(dpy)) {
+                ::XNextEvent(dpy, &x_event);
+
+                // Safely cast the raw integer event type to our type-safe C++ enum
+                const auto current_event = static_cast<X11::EventType>(x_event.type);
+
+                switch (current_event) {
+                    case X11::EventType::Expose: {
+                        if (on_paint_cb_) on_paint_cb_();
+                        break;
                     }
-                }
-                else if (x_event.type == 17) { 
-                    should_close_ = true;
+                    case X11::EventType::ConfigureNotify: {
+                        width_ = x_event.xconfigure.width;
+                        height_ = x_event.xconfigure.height;
+                        if (on_resize_cb_) {
+                            on_resize_cb_(X11::ResizeEvent{width_, height_});
+                        }
+                        break;
+                    }
+                    case X11::EventType::DestroyNotify: {
+                        should_close_ = true;
+                        break;
+                    }
+                    case X11::EventType::ClientMessage: {
+                        // Check if the message data matches our close atom payload
+                        if (static_cast<unsigned long>(x_event.xclient.data.l[0]) == wm_delete_window_) {
+                            should_close_ = true;
+                        }
+                        break;
+                    }
+                    default:
+                        break;
                 }
             }
         }
