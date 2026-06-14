@@ -27,7 +27,7 @@ int main() {
 - **ultra-fast sub-millisecond compiles**: compiles via pure `import std;` using gcc's native module caching (`-fmodules-ts`). no text copy-pasting.
 - **no cmake bloat**: built via a raw, lean, deterministic shell script because cmake is an over-engineered tragedy.
 
-## building (arch linux)
+## building 
 ensure you have up-to-date system development packages and `g++`:
 ```bash
 chmod +x build.sh
