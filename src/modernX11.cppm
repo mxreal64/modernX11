@@ -2,18 +2,13 @@
 // Licensed under the GPL-3.0 License
 
 module;
-
-// Isolate toxic legacy headers inside the global module fragment
 #include <X11/Xlib.h>
-#include <gtk/gtk.h>
-#include <webkit2/webkit2.h>
-#include <gdk/gdkx.h>
+#include <X11/Xutil.h>
 
 export module modernX11;
 
 import std;
 
-// 1. NON-EXPORTED SECTION: Capture macro states before destroying them
 namespace InternalUI {
     [[nodiscard]] int get_default_screen(void* d) noexcept { 
         return DefaultScreen(static_cast<::Display*>(d)); 
@@ -28,80 +23,120 @@ namespace InternalUI {
         return WhitePixel(static_cast<::Display*>(d), s); 
     }
 
-    // Capture the raw layout integer constants cleanly right here
+    // 1. CAPTURE FIRST: Store the raw values safely while the macros still exist
     constexpr long tmp_structure_notify_mask = StructureNotifyMask;
     constexpr long tmp_exposure_mask = ExposureMask;
 }
 
-// 2. THE PURGE: Forcefully execute preprocessor wipes on the X11 macros.
-// This clears the identifiers completely so they can be reused as legal C++ labels.
+// 2. PURGE SECOND: Kill the macros now so they can be legally reused as clean C++ tokens
 #undef StructureNotifyMask
 #undef ExposureMask
 
 export namespace X11 {
+    struct WindowHandle {
+        unsigned long xid = 0;
+        [[nodiscard]] explicit constexpr operator bool() const noexcept { return xid != 0; }
+    };
+
     using DisplayHandle = void*;
-    using Window = ::Window;
-    using GtkWidget = ::GtkWidget;
-    using GdkWindow = ::GdkWindow;
 
-    // 3. EXPORT CLEAN CONSTANTS: They are now completely free of preprocessor text mutations!
+    // 3. EXPORT THIRD: Clean, namespaced type-safe C++ constants free of preprocessor tricks
     constexpr long StructureNotifyMask = InternalUI::tmp_structure_notify_mask;
-    constexpr long ExposureMask = InternalUI::tmp_exposure_mask;
+    constexpr long ExposureMask        = InternalUI::tmp_exposure_mask;
 
-    inline DisplayHandle open_display(const char* name) noexcept { 
+    enum class EventType : unsigned char {
+        Unknown,
+        Paint,
+        Resize,
+        Quit
+    };
+
+    struct ResizeEvent {
+        int width = 0;
+        int height = 0;
+    };
+
+    [[nodiscard]] inline DisplayHandle open_display(const char* name) noexcept { 
         return static_cast<DisplayHandle>(::XOpenDisplay(name)); 
     }
     inline int close_display(DisplayHandle d) noexcept { 
         return ::XCloseDisplay(static_cast<::Display*>(d)); 
     }
-    
-    inline ::Window create_simple_window(DisplayHandle d, ::Window r, int x, int y, unsigned int w, unsigned int h, unsigned int b, unsigned long b_px, unsigned long w_px) noexcept {
-        return ::XCreateSimpleWindow(static_cast<::Display*>(d), r, x, y, w, h, b, b_px, w_px);
+    [[nodiscard]] inline WindowHandle create_window(DisplayHandle d, WindowHandle root, int x, int y, unsigned int w, unsigned int h, unsigned long b_px, unsigned long w_px) noexcept {
+        return WindowHandle{ ::XCreateSimpleWindow(static_cast<::Display*>(d), root.xid, x, y, w, h, 1, b_px, w_px) };
     }
-    
-    inline int store_name(DisplayHandle d, ::Window w, const char* name) noexcept { 
-        return ::XStoreName(static_cast<::Display*>(d), w, name); 
-    }
-    inline int select_input(DisplayHandle d, ::Window w, long mask) noexcept { 
-        return ::XSelectInput(static_cast<::Display*>(d), w, mask); 
-    }
-    inline int map_window(DisplayHandle d, ::Window w) noexcept { 
-        return ::XMapWindow(static_cast<::Display*>(d), w); 
-    }
-    inline int flush(DisplayHandle d) noexcept { 
-        return ::XFlush(static_cast<::Display*>(d)); 
-    }
-    inline int destroy_window(DisplayHandle d, ::Window w) noexcept { 
-        return ::XDestroyWindow(static_cast<::Display*>(d), w); 
-    }
-    
-    using ::gtk_init;
-    using ::gtk_window_new;
-    using ::gtk_widget_realize;
-    using ::gtk_widget_get_window;
-    using ::webkit_web_view_new;
-    using ::webkit_web_view_load_html;
-    using ::webkit_web_view_get_user_content_manager;
-    using ::webkit_user_content_manager_register_script_message_handler;
-    
-    using ::g_main_context_iteration;
-    using ::g_main_context_default;
+    inline void map_window(DisplayHandle d, WindowHandle w) noexcept { ::XMapWindow(static_cast<::Display*>(d), w.xid); }
+    inline void flush(DisplayHandle d) noexcept { ::XFlush(static_cast<::Display*>(d)); }
+    inline void destroy_window(DisplayHandle d, WindowHandle w) noexcept { ::XDestroyWindow(static_cast<::Display*>(d), w.xid); }
 }
 
-export namespace SysUI {
-    [[nodiscard]] inline int default_screen(X11::DisplayHandle d) noexcept { 
-        return InternalUI::get_default_screen(d); 
-    }
-    [[nodiscard]] inline ::Window root_window(X11::DisplayHandle d, int s) noexcept { 
-        return InternalUI::get_root_window(d, s); 
-    }
-    [[nodiscard]] inline unsigned long black_pixel(X11::DisplayHandle d, int s) noexcept { 
-        return InternalUI::get_black_pixel(d, s); 
-    }
-    [[nodiscard]] inline unsigned long white_pixel(X11::DisplayHandle d, int s) noexcept { 
-        return InternalUI::get_white_pixel(d, s); 
-    }
-    [[nodiscard]] inline ::Window gdk_window_xid(X11::GdkWindow* w) noexcept { 
-        return GDK_WINDOW_XID(w); 
-    }
+export namespace CoreUI {
+
+    class ContextWindow {
+    private:
+        X11::DisplayHandle display_ = nullptr;
+        X11::WindowHandle win_handle_{};
+        
+        int width_ = 0;
+        int height_ = 0;
+        bool should_close_ = false;
+
+        std::function<void()> on_paint_cb_;
+        std::function<void(X11::ResizeEvent)> on_resize_cb_;
+
+    public:
+        ContextWindow(std::string_view title, int width, int height) 
+            : width_(width), height_(height) 
+        {
+            display_ = X11::open_display(nullptr);
+            if (!display_) throw std::runtime_error("X11 connection failed.");
+
+            int screen = InternalUI::get_default_screen(display_);
+            auto root_xid = InternalUI::get_root_window(display_, screen);
+            
+            win_handle_ = X11::create_window(
+                display_, X11::WindowHandle{root_xid}, 100, 100, width_, height_,
+                InternalUI::get_black_pixel(display_, screen),
+                InternalUI::get_white_pixel(display_, screen)
+            );
+
+            ::XStoreName(static_cast<::Display*>(display_), win_handle_.xid, std::string(title).c_str());
+            ::XSelectInput(static_cast<::Display*>(display_), win_handle_.xid, X11::StructureNotifyMask | X11::ExposureMask);
+            X11::map_window(display_, win_handle_);
+            X11::flush(display_);
+        }
+
+        ~ContextWindow() {
+            if (display_ && win_handle_) {
+                X11::destroy_window(display_, win_handle_);
+                X11::close_display(display_);
+            }
+        }
+
+        void set_paint_callback(std::function<void()>&& cb) noexcept { on_paint_cb_ = std::move(cb); }
+        void set_resize_callback(std::function<void(X11::ResizeEvent)>&& cb) noexcept { on_resize_cb_ = std::move(cb); }
+
+        [[nodiscard]] bool running() const noexcept { return !should_close_; }
+
+        void poll_events() noexcept {
+            ::XEvent x_event;
+            while (::XPending(static_cast<::Display*>(display_))) {
+                ::XNextEvent(static_cast<::Display*>(display_), &x_event);
+
+                if (x_event.type == 12) { 
+                    if (on_paint_cb_) on_paint_cb_();
+                } 
+                else if (x_event.type == 22) { 
+                    width_ = x_event.xconfigure.width;
+                    height_ = x_event.xconfigure.height;
+                    if (on_resize_cb_) {
+                        on_resize_cb_(X11::ResizeEvent{width_, height_});
+                    }
+                }
+                else if (x_event.type == 17) { 
+                    should_close_ = true;
+                }
+            }
+        }
+    };
 }
